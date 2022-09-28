@@ -109,7 +109,6 @@ class MiniImagenet(Dataset):
                 # 2. select k_shot + k_query for each class
                 selected_imgs_idx = np.random.choice(len(self.data[cls]), self.k_shot + self.k_query, False)
                 np.random.shuffle(selected_imgs_idx)
-                print(selected_imgs_idx)
                 indexDtrain = np.array(selected_imgs_idx[:self.k_shot])  # idx for Dtrain
                 indexDtest = np.array(selected_imgs_idx[self.k_shot:])  # idx for Dtest
                 support_x.append(
@@ -117,11 +116,8 @@ class MiniImagenet(Dataset):
                 query_x.append(np.array(self.data[cls])[indexDtest].tolist())
                 selected_classes_temp.append(cls)
 
-            # shuffle the correponding relation between support set and query set
-            # random.shuffle(support_x)
-            # random.shuffle(query_x)
-
             self.support_x_batch.append(support_x)  # append set to current sets
+            print(type(support_x))
             self.query_x_batch.append(query_x)  # append sets to current sets
             self.selected_classes.append(selected_classes_temp)
 

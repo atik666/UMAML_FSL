@@ -7,6 +7,7 @@ from PIL import Image
 import random
 from os import walk
 import glob
+from tqdm import tqdm
 
 class MiniImagenet(Dataset):
     """
@@ -51,14 +52,22 @@ class MiniImagenet(Dataset):
                                                  transforms.ToTensor(),
                                                  transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
                                                  ])
+            
+        self.transform1 = transforms.Compose([lambda x: Image.open(x).convert('RGB'),
+                                             transforms.Resize((self.resize, self.resize)),
+                                             # transforms.RandomHorizontalFlip(),
+                                             transforms.RandomRotation(90),
+                                             transforms.ToTensor(),
+                                             transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+                                             ])
 
         self.path = os.path.join(root, mode)  # image path
-        
+        self.root = root
         # :return: dictLabels: {label1: [filename1, filename2, filename3, filename4,...], }
         
         if mode == 'train':
             img = self.loadCSV(root, mode)
-            self.cls_num = n_way
+            self.img = img
         else:
             dictLabels = self.loadCSV(root, mode)  # csv path
             self.data = []
@@ -68,7 +77,15 @@ class MiniImagenet(Dataset):
                 self.img2label[label] = i + self.startidx  # {"img_name[:9]":label}
             self.cls_num = len(self.data)
     
-        self.create_batch(self.batchsz)
+        self.cls_num = n_way
+        self.mode = mode
+        
+        if self.mode == 'train':  
+            self.create_batch_train(self.batchsz)
+            
+        elif self.mode == 'test':
+            self.create_batch(self.batchsz)
+
 
     def loadCSV(self, root, mode):
         
@@ -106,6 +123,34 @@ class MiniImagenet(Dataset):
                     
             return dictLabels
     
+    def create_batch_train(self, batchsz):
+        """
+        create batch for meta-learning.
+        ×episode× here means batch, and it means how many sets we want to retain.
+        :param episodes: batch size
+        :return:
+        """
+        self.support_x_batch1 = []  # support set batch
+        self.query_x_batch1 = []  # query set batch
+        self.selected_classes1 = []
+        for b in tqdm(range(batchsz)):  # for each batch
+            # 1.select n_way classes randomly
+            selected_cls = np.random.choice(self.cls_num, self.n_way, False)  # no duplicate
+            np.random.shuffle(selected_cls)
+            np.random.shuffle(self.img)
+            support_x = []
+            selected_classes_temp = []
+            for cls in selected_cls:
+                # 2. select k_shot + k_query for each class
+                selected_imgs_idx = np.random.choice(len(self.img), self.k_shot + self.k_query, False)
+                np.random.shuffle(selected_imgs_idx)
+                indexDtrain = np.array(selected_imgs_idx[:self.k_shot])  # idx for Dtrain
+                support_x.append(
+                    np.array(self.img)[indexDtrain].tolist())  # get all images filename for current Dtrain
+                selected_classes_temp.append(cls)
+
+            self.support_x_batch1.append(support_x)  # append set to current sets
+            self.selected_classes1.append(selected_classes_temp)
 
     def create_batch(self, batchsz):
         """
@@ -149,60 +194,93 @@ class MiniImagenet(Dataset):
         :param index:
         :return:
         """
-        # [setsz, 3, resize, resize]
-        support_x = torch.FloatTensor(self.setsz, 3, self.resize, self.resize)
-        # [setsz]
-        #support_y = np.zeros((self.setsz), dtype=np.int32)
-        # [querysz, 3, resize, resize]
-        query_x = torch.FloatTensor(self.querysz, 3, self.resize, self.resize)
-        # [querysz]
-        #query_y = np.zeros((self.querysz), dtype=np.int32)
-
-        flatten_support_x = [os.path.join(self.path, item)
-                             for sublist in self.support_x_batch[index] for item in sublist]
-        # support_y = np.array(
-        #     [self.img2label[item[:9]]  # filename:n0153282900000005.jpg, the first 9 characters treated as label
-        #      for sublist in self.support_x_batch[index] for item in sublist]).astype(np.int32)
+        if self.mode == 'train':
+            support_x1 = torch.FloatTensor(self.setsz, 3, self.resize, self.resize)
+            query_x1 = torch.FloatTensor(self.querysz, 3, self.resize, self.resize)
+            path = os.path.join(self.root, 'unlebelled/')
+            flatten_support_x1 = [os.path.join(path, item)
+                                 for sublist in self.support_x_batch1[index] for item in sublist]
+            support_y_list1 = []
+            for i in range(len(self.support_x_batch1[index])):
+                class_temp1 = np.repeat(self.selected_classes1[index][i], len(self.support_x_batch1[index][i]))
+                support_y_list1.append(class_temp1)
+            support_y1 = np.array(support_y_list1).flatten().astype(np.int32)
+            
+            flatten_query_x1 = flatten_support_x1
+            query_y1 = support_y1
+            
+            unique1 = np.unique(support_y1)
+            random.shuffle(unique1)
+            # relative means the label ranges from 0 to n-way
+            support_y_relative1 = np.zeros(self.setsz)
+            query_y_relative1 = np.zeros(self.querysz)
+            for idx, l in enumerate(unique1):
+                support_y_relative1[support_y1 == l] = idx
+                query_y_relative1[query_y1 == l] = idx
+                
+            for i, path in enumerate(flatten_support_x1):
+                support_x1[i] = self.transform(path)
+                
+            for i, path in enumerate(flatten_query_x1):
+                query_x1[i] = self.transform1(path)
+                
+            return support_x1, torch.LongTensor(support_y_relative1), query_x1, torch.LongTensor(query_y_relative1)
         
-        support_y_list = []
-        for i in range(len(self.support_x_batch[index])):
-            class_temp = np.repeat(self.selected_classes[index][i], len(self.support_x_batch[index][i]))
-            support_y_list.append(class_temp)
-        support_y = np.array(support_y_list).flatten().astype(np.int32)
-
-        flatten_query_x = [os.path.join(self.path, item)
-                           for sublist in self.query_x_batch[index] for item in sublist]
-        # query_y = np.array([self.img2label[item[:9]]
-        #                     for sublist in self.query_x_batch[index] for item in sublist]).astype(np.int32)
-        
-        query_y_list = []
-        for i in range(len(self.query_x_batch[index])):
-            class_temp = np.repeat(self.selected_classes[index][i], len(self.query_x_batch[index][i]))
-            query_y_list.append(class_temp)
-        query_y = np.array(query_y_list).flatten().astype(np.int32)
-
-        # print('global:', support_y, query_y)
-        # support_y: [setsz]
-        # query_y: [querysz]
-        # unique: [n-way], sorted
-        unique = np.unique(support_y)
-        random.shuffle(unique)
-        # relative means the label ranges from 0 to n-way
-        support_y_relative = np.zeros(self.setsz)
-        query_y_relative = np.zeros(self.querysz)
-        for idx, l in enumerate(unique):
-            support_y_relative[support_y == l] = idx
-            query_y_relative[query_y == l] = idx
-
-        # print('relative:', support_y_relative, query_y_relative)
-
-        for i, path in enumerate(flatten_support_x):
-            support_x[i] = self.transform(path)
-
-        for i, path in enumerate(flatten_query_x):
-            query_x[i] = self.transform(path)
-
-        return support_x, torch.LongTensor(support_y_relative), query_x, torch.LongTensor(query_y_relative)
+        elif self.mode == 'test':
+            # [setsz, 3, resize, resize]
+            support_x = torch.FloatTensor(self.setsz, 3, self.resize, self.resize)
+            # [setsz]
+            #support_y = np.zeros((self.setsz), dtype=np.int32)
+            # [querysz, 3, resize, resize]
+            query_x = torch.FloatTensor(self.querysz, 3, self.resize, self.resize)
+            # [querysz]
+            #query_y = np.zeros((self.querysz), dtype=np.int32)
+    
+            flatten_support_x = [os.path.join(self.path, item)
+                                 for sublist in self.support_x_batch[index] for item in sublist]
+            # support_y = np.array(
+            #     [self.img2label[item[:9]]  # filename:n0153282900000005.jpg, the first 9 characters treated as label
+            #      for sublist in self.support_x_batch[index] for item in sublist]).astype(np.int32)
+            
+            support_y_list = []
+            for i in range(len(self.support_x_batch[index])):
+                class_temp = np.repeat(self.selected_classes[index][i], len(self.support_x_batch[index][i]))
+                support_y_list.append(class_temp)
+            support_y = np.array(support_y_list).flatten().astype(np.int32)
+    
+            flatten_query_x = [os.path.join(self.path, item)
+                               for sublist in self.query_x_batch[index] for item in sublist]
+            # query_y = np.array([self.img2label[item[:9]]
+            #                     for sublist in self.query_x_batch[index] for item in sublist]).astype(np.int32)
+            
+            query_y_list = []
+            for i in range(len(self.query_x_batch[index])):
+                class_temp = np.repeat(self.selected_classes[index][i], len(self.query_x_batch[index][i]))
+                query_y_list.append(class_temp)
+            query_y = np.array(query_y_list).flatten().astype(np.int32)
+    
+            # print('global:', support_y, query_y)
+            # support_y: [setsz]
+            # query_y: [querysz]
+            # unique: [n-way], sorted
+            unique = np.unique(support_y)
+            random.shuffle(unique)
+            # relative means the label ranges from 0 to n-way
+            support_y_relative = np.zeros(self.setsz)
+            query_y_relative = np.zeros(self.querysz)
+            for idx, l in enumerate(unique):
+                support_y_relative[support_y == l] = idx
+                query_y_relative[query_y == l] = idx
+    
+            # print('relative:', support_y_relative, query_y_relative)
+    
+            for i, path in enumerate(flatten_support_x):
+                support_x[i] = self.transform(path)
+    
+            for i, path in enumerate(flatten_query_x):
+                query_x[i] = self.transform(path)
+    
+            return support_x, torch.LongTensor(support_y_relative), query_x, torch.LongTensor(query_y_relative)
 
     def __len__(self):
         # as we have built up to batchsz of sets, you can sample some small batch size of sets.
@@ -505,7 +583,7 @@ def mean_confidence_interval(accs, confidence=0.95):
 
 
 n_way = 5
-epochs = 6
+epochs = 20
 
 
 def main():
@@ -547,11 +625,11 @@ def main():
     # batchsz here means total episode number
     
     path = '/home/atik/Documents/UMAML_FSL/data'
-    mini_train = MiniImagenet(path, mode='train', n_way=n_way, k_shot=5,
-                        k_query=15,
+    mini_train = MiniImagenet(path, mode='train', n_way=n_way, k_shot=1,
+                        k_query=1,
                         batchsz=10000, resize=84)
-    mini_test = MiniImagenet(path, mode='test', n_way=n_way, k_shot=5,
-                             k_query=15,
+    mini_test = MiniImagenet(path, mode='test', n_way=n_way, k_shot=1,
+                             k_query=1,
                              batchsz=100, resize=84)
     
 
