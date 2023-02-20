@@ -1,13 +1,14 @@
 import os
 import torch
 from torch.utils.data import Dataset
-from torchvision.transforms import transforms
 import numpy as np
 from PIL import Image
 import random
 from os import walk
 import glob
 from tqdm import tqdm
+from torchvision.transforms.autoaugment import AutoAugmentPolicy
+import torchvision.transforms as transforms
 
 class MiniImagenet(Dataset):
     """
@@ -56,7 +57,10 @@ class MiniImagenet(Dataset):
         self.transform1 = transforms.Compose([lambda x: Image.open(x).convert('RGB'),
                                              transforms.Resize((self.resize, self.resize)),
                                              # transforms.RandomHorizontalFlip(),
-                                             transforms.RandomRotation(90),
+                                             # transforms.RandomResizedCrop(size=(84, 84)),
+                                             # transforms.RandomRotation(90),
+                                             transforms.AutoAugment(policy = AutoAugmentPolicy.IMAGENET),
+                                             #transforms.AutoAugment(AutoAugmentPolicy = AutoAugmentPolicy.IMAGENET),
                                              transforms.ToTensor(),
                                              transforms.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
                                              ])
@@ -258,6 +262,7 @@ class MiniImagenet(Dataset):
                 class_temp = np.repeat(self.selected_classes[index][i], len(self.query_x_batch[index][i]))
                 query_y_list.append(class_temp)
             query_y = np.array(query_y_list).flatten().astype(np.int32)
+            #print(query_y)
     
             # print('global:', support_y, query_y)
             # support_y: [setsz]
@@ -583,7 +588,7 @@ def mean_confidence_interval(accs, confidence=0.95):
 
 
 n_way = 5
-epochs = 20
+epochs = 25
 
 
 def main():
@@ -633,6 +638,7 @@ def main():
                              batchsz=100, resize=84)
     
 
+    accuracies = []
     for epoch in tqdm(range(epochs)):
         # fetch meta_batchsz num of episode each time
         db = DataLoader(mini_train, batch_size=4, shuffle=True, num_workers=4, pin_memory=True)
@@ -641,7 +647,6 @@ def main():
 
             x_spt, y_spt, x_qry, y_qry = x_spt.to(device), y_spt.to(device), x_qry.to(device), y_qry.to(device)
             accs = maml(x_spt, y_spt, x_qry, y_qry)
-            
             
             if step % 100 == 0:
                 print('\n','step:', step, '\ttraining acc:', accs)
@@ -659,6 +664,8 @@ def main():
 
                 # [b, update_step+1]
                 accs = np.array(accs_all_test).mean(axis=0).astype(np.float16)
+                accuracies.append(accs[-1])
+
                 print('Test acc:', accs)
 
 main()    
